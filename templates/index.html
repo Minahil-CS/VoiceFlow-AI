@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VoiceFlow AI</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="badge">ASSEMBLYAI VOICE AGENT</div>
+      <h1>VoiceFlow <span>AI</span></h1>
+      <p>Speak naturally. Turn your words into organized tasks.</p>
+    </header>
+
+    <section class="card hero">
+      <button id="recordBtn" class="mic">🎙</button>
+      <h2 id="status">Ready to listen</h2>
+      <p id="hint">Click the microphone and say something like:<br>
+        “Remind me tomorrow to submit my university form.”</p>
+      <div id="transcript" class="transcript">Your transcript will appear here.</div>
+    </section>
+
+    <section id="taskCard" class="card task hidden">
+      <h2>Detected task</h2>
+      <div class="row"><b>Task</b><span id="taskText"></span></div>
+      <div class="row"><b>Priority</b><span id="priority"></span></div>
+      <div class="row"><b>Due</b><span id="due"></span></div>
+      <div class="actions">
+        <button id="addBtn">✓ Add task</button>
+        <button id="clearBtn" class="secondary">Clear</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="listHead"><h2>My tasks</h2><button id="clearAll" class="link">Clear all</button></div>
+      <ul id="taskList"></ul>
+      <p id="empty" class="muted">No tasks yet.</p>
+    </section>
+
+    <footer>Built with AssemblyAI • Voice-first productivity prototype</footer>
+  </main>
+
+<script>
+let mediaRecorder = null;
+let audioChunks = [];
+let currentTask = null;
+let recordingStartTime = 0;
+let localStream = null;
+
+const recordBtn = document.getElementById("recordBtn");
+const status = document.getElementById("status");
+const transcript = document.getElementById("transcript");
+
+function getSupportedMimeType() {
+    const types = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+        "audio/ogg;codecs=opus"
+    ];
+
+    for (const type of types) {
+        if (MediaRecorder.isTypeSupported(type)) {
+            return type;
+        }
+    }
+    return "";
+}
+
+recordBtn.onclick = async () => {
+
+    // --- STOP RECORDING ---
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+
+        const duration = (Date.now() - recordingStartTime) / 1000;
+
+        if (duration < 1.2) {
+            status.textContent = "Please speak for at least 1-2 seconds.";
+            return;
+        }
+
+        status.textContent = "Processing your voice...";
+        recordBtn.disabled = true;
+        recordBtn.classList.remove("recording");
+
+        mediaRecorder.requestData();
+        
+        setTimeout(() => {
+            if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+            }
+        }, 200);
+
+        return;
+    }
+
+    // --- START RECORDING ---
+    try {
+        audioChunks = [];
+
+        localStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1
+            }
+        });
+
+        const mimeType = getSupportedMimeType();
+        if (!mimeType) {
+            throw new Error("Your browser does not support compatible audio recording.");
+        }
+
+        mediaRecorder = new MediaRecorder(localStream, { mimeType: mimeType });
+
+        mediaRecorder.ondataavailable = function(event) {
+            if (event.data && event.data.size > 0) {
+                audioChunks.push(event.data);
+            }
+        };
+
+        mediaRecorder.onerror = function(event) {
+            console.error("MediaRecorder error:", event.error);
+            status.textContent = "Microphone recording error.";
+            recordBtn.disabled = false;
+            recordBtn.classList.remove("recording");
+        };
+
+        mediaRecorder.onstop = async function() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+
+            const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+
+            if (audioBlob.size < 2000) {
+                status.textContent = "Recording too short or silent. Please speak again.";
+                transcript.textContent = "No audio detected. Please hold the mic and speak clearly.";
+                recordBtn.disabled = false;
+                return;
+            }
+
+            const extension = audioBlob.type.includes("mp4") ? "mp4" : "webm";
+            const formData = new FormData();
+            formData.append("audio", audioBlob, `voice.${extension}`);
+
+            try {
+                status.textContent = "Transcribing with AssemblyAI...";
+
+                const response = await fetch("/api/transcribe", {
+                    method: "POST",
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || "Transcription failed.");
+                }
+
+                const text = (data.text || "").trim();
+
+                if (!text) {
+                    status.textContent = "No speech recognized";
+                    transcript.textContent = "I couldn't understand any speech. Please speak clearly and try again.";
+                    return;
+                }
+
+                transcript.textContent = `"${text}"`;
+                status.textContent = "Voice understood ✓";
+                makeTask(text);
+
+            } catch (error) {
+                console.error("TRANSCRIPTION ERROR:", error);
+                status.textContent = "Error processing audio";
+                transcript.textContent = error.message;
+            } finally {
+                recordBtn.disabled = false;
+            }
+        };
+
+        mediaRecorder.start(200);
+        recordingStartTime = Date.now();
+        recordBtn.classList.add("recording");
+
+        status.textContent = "🎙 Listening... Click mic when done";
+        transcript.textContent = "Listening to your voice...";
+
+    } catch (error) {
+        console.error("MICROPHONE ERROR:", error);
+        status.textContent = "Microphone error";
+        transcript.textContent = error.message || "Could not access microphone.";
+        recordBtn.disabled = false;
+        recordBtn.classList.remove("recording");
+    }
+};
+
+function makeTask(text) {
+    const lower = text.toLowerCase();
+    let priority = "Medium";
+
+    if (lower.includes("high priority") || lower.includes("urgent")) {
+        priority = "High";
+    } else if (lower.includes("low priority")) {
+        priority = "Low";
+    }
+
+    let due = "Not specified";
+    if (lower.includes("tomorrow")) {
+        due = "Tomorrow";
+    } else if (lower.includes("today")) {
+        due = "Today";
+    }
+
+    let task = text
+        .replace(/high priority/ig, "")
+        .replace(/medium priority/ig, "")
+        .replace(/low priority/ig, "")
+        .replace(/\btoday\b/ig, "")
+        .replace(/\btomorrow\b/ig, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    currentTask = {
+        text: task || text,
+        priority: priority,
+        due: due
+    };
+
+    document.getElementById("taskText").textContent = currentTask.text;
+    document.getElementById("priority").textContent = currentTask.priority;
+    document.getElementById("due").textContent = currentTask.due;
+    document.getElementById("taskCard").classList.remove("hidden");
+}
+
+document.getElementById("addBtn").onclick = () => {
+    if (!currentTask) return;
+    const tasks = JSON.parse(localStorage.getItem("voiceflow_tasks") || "[]");
+    tasks.unshift(currentTask);
+    localStorage.setItem("voiceflow_tasks", JSON.stringify(tasks));
+    currentTask = null;
+    document.getElementById("taskCard").classList.add("hidden");
+    status.textContent = "Task added ✓";
+    renderTasks();
+};
+
+document.getElementById("clearBtn").onclick = () => {
+    currentTask = null;
+    document.getElementById("taskCard").classList.add("hidden");
+};
+
+document.getElementById("clearAll").onclick = () => {
+    localStorage.removeItem("voiceflow_tasks");
+    renderTasks();
+};
+
+function renderTasks() {
+    const tasks = JSON.parse(localStorage.getItem("voiceflow_tasks") || "[]");
+    const list = document.getElementById("taskList");
+    const empty = document.getElementById("empty");
+
+    list.innerHTML = "";
+    empty.style.display = tasks.length ? "none" : "block";
+
+    tasks.forEach((task, index) => {
+        const li = document.createElement("li");
+        li.innerHTML = `
+            <div>
+                <strong>${escapeHtml(task.text)}</strong>
+                <small>${task.due} • ${task.priority} priority</small>
+            </div>
+            <button onclick="removeTask(${index})">×</button>
+        `;
+        list.appendChild(li);
+    });
+}
+
+function removeTask(index) {
+    const tasks = JSON.parse(localStorage.getItem("voiceflow_tasks") || "[]");
+    tasks.splice(index, 1);
+    localStorage.setItem("voiceflow_tasks", JSON.stringify(tasks));
+    renderTasks();
+}
+
+function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, function(character) {
+        return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#039;"
+        }[character];
+    });
+}
+
+renderTasks();
+</script>
+</body>
+</html>
